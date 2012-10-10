@@ -5,7 +5,10 @@ usage() {
 cat <<USAGE
 usage: $0 options
 
-Simple script for creating copy-on-write QEMU/KVM guests.
+Simple script for creating copy-on-write QEMU/KVM guests. For the base image
+install Fedora or RHEL (compatible), install acpid and ntpd or similar, do not
+make any swap partition (use -s option), make sure the hostname is the same
+as the vm name and it has "base" in it. Example: rhel-6-base.
 
 OPTIONS:
   -h             Show this message
@@ -14,17 +17,23 @@ OPTIONS:
   -b [image]     Base image name (template) - required
   -t [image]     Target image name (and hostname) - required
   -n [network]   Network settings (default: "network=default")
+  -k [network2]  Second network NIC settings (none by default)
   -m [MB]        Memory (default: 800 MiB)
   -c [CPUs]      Number of CPUs (default: 1)
-  -p [path]      Images path (default: /var/lib/libvirt/images/)
+  -p [path]      Target images path (default: /var/lib/libvirt/images/)
+  -e [path]      Base images path (default: /var/lib/libvirt/images/)
   -d [domain]    Domain suffix like "mycompany.com" (default: none)
   -f             Force creating new guest (no questions)
+  -w             Add IP address to /etc/hosts (works only with NAT)
+  -s             Swap size (in MB) that is appeded as /dev/sdb to fstab
+  -1 [command]   Command to execute during first boot in /root dir
+                 (logfile available in /root/firstboot.log)
 
 EXAMPLE:
 
   $0 -l
   $0 -p /mnt/data/images -l
-  $0 -b fedora-17-base -t test-vm
+  $0 -b fedora-17-base -t test-vm -s 4098
   $0 -b fedora-17-base -t test-vm2 -n bridge=br0 -d example.com
   $0 -b rhel-6-base -t test-vm -m 2048 -c 4 -p /mnt/data/images
 USAGE
@@ -33,15 +42,20 @@ USAGE
 SOURCE_NAME=""
 TARGET_NAME=""
 NETWORK="network=default"
+NETWORK2=""
 MEM="800"
+SWAP=0
 CPUS="1"
 IMAGE_DIR="/var/lib/libvirt/images"
+BASE_IMAGE_DIR="/var/lib/libvirt/images"
 DOMAIN=""
 FORCE=0
 LIST=0
 LIST_ALL=0
+ADD_IP=0
+COMMAND=""
 
-while getopts "hlafb:t:n:m:c:d:p:" opt; do
+while getopts "hlafwb:t:n:m:c:d:p:s:k:1:e:" opt; do
   case $opt in
     l)
       LIST=1
@@ -52,8 +66,14 @@ while getopts "hlafb:t:n:m:c:d:p:" opt; do
     f)
       FORCE=1
       ;;
+    w)
+      ADD_IP=1
+      ;;
     p)
       IMAGE_DIR="$OPTARG"
+      ;;
+    e)
+      BASE_IMAGE_DIR="$OPTARG"
       ;;
     b)
       SOURCE_NAME="$OPTARG"
@@ -64,6 +84,9 @@ while getopts "hlafb:t:n:m:c:d:p:" opt; do
     n)
       NETWORK="$OPTARG"
       ;;
+    k)
+      NETWORK2="--network=$OPTARG"
+      ;;
     m)
       MEM="$OPTARG"
       ;;
@@ -72,6 +95,12 @@ while getopts "hlafb:t:n:m:c:d:p:" opt; do
       ;;
     d)
       DOMAIN=".$OPTARG"
+      ;;
+    s)
+      SWAP="$OPTARG"
+      ;;
+    1)
+      COMMAND="$OPTARG"
       ;;
     h)
       usage
@@ -85,18 +114,24 @@ while getopts "hlafb:t:n:m:c:d:p:" opt; do
   esac
 done
 
-[ $LIST -eq 1 ] && ls "$IMAGE_DIR" | grep '\.img' | grep base | sed 's/\.img//g' && exit 0
-[ $LIST_ALL -eq 1 ] && ls "$IMAGE_DIR" | grep '\.img' | sed 's/\.img//g' && exit 0
+[ $LIST -eq 1 ] && ls "$BASE_IMAGE_DIR" | grep '\.img' | grep base | sed 's/\.img//g' && exit 0
+[ $LIST_ALL -eq 1 ] && ls "$BASE_IMAGE_DIR" | grep '\.img' | sed 's/\.img//g' && exit 0
 
 if [ -z "$SOURCE_NAME" -o -z "$TARGET_NAME" ]; then
   usage
   exit 1
 fi
 
-SOURCE_IMG=$IMAGE_DIR/$SOURCE_NAME.img
+SOURCE_IMG=$BASE_IMAGE_DIR/$SOURCE_NAME.img
 TARGET_IMG=$IMAGE_DIR/$TARGET_NAME.img
-MAC="52:54:00$(echo "$TARGET_NAME" | openssl dgst -md5 -binary | hexdump -e '/1 ":%02x"' -n 3)"
+TARGET_IMG_SWAP=$IMAGE_DIR/$TARGET_NAME-swap.img
+MAC="52:54:00$(echo "$(hostname)$TARGET_NAME" | openssl dgst -md5 -binary | hexdump -e '/1 ":%02x"' -n 3)"
 HOSTNM="$TARGET_NAME$DOMAIN"
+
+if [ ! -f "$SOURCE_IMG" ]; then
+  echo "Base image $SOURCE_IMG not found!"
+  exit 1
+fi
 
 if [ -f "$TARGET_IMG" ]; then
   echo "Target image already exists!"
@@ -132,21 +167,71 @@ sed -i -e "s/HOSTNAME=.*/HOSTNAME=$HOSTNM/" $TMPDIR/etc/sysconfig/network
 grep $SOURCE_NAME $TMPDIR/etc/hosts && sed -i -e "s/$SOURCE_NAME/localbox/" $TMPDIR/etc/hosts
 # add host and host.domain localhost record there
 echo "127.0.0.1 $TARGET_NAME $HOSTNM" >> $TMPDIR/etc/hosts
-umount $TMPDIR
+if [ $SWAP -gt 0 ]; then
+  # add swap file
+  echo '/dev/vdb none swap swap 0 0' >> $TMPDIR/etc/fstab
+fi
+# prepare firstboot command and tt "watch progress" alias
+if [ ! -z "$COMMAND" ]; then
+  echo -e "pushd /root\n$COMMAND\npopd" > $TMPDIR/root/firstboot.sh
+  echo -e "#!/bin/bash\n/usr/bin/screen -d -m /bin/bash -c 'bash -x /root/firstboot.sh 2>&1 | /usr/bin/tee /root/firstboot.log'" >> $TMPDIR/etc/rc.d/rc.local
+  echo -e "\n# snap-guest\nalias tt='tail -f -n200 /root/firstboot.log'\nalias ttr='screen -rd'" >> $TMPDIR/root/.bashrc
+  chmod +x $TMPDIR/etc/rc.d/rc.local
+fi
+umount $TMPDIR && rmdir $TMPDIR
+
+# -- Swap Creation --------------
+
+if [ $SWAP -gt 0 ]; then
+  qemu-img create -f raw $TARGET_IMG_SWAP ${SWAP}M
+  mkswap -f $TARGET_IMG_SWAP
+  DISK_SWAP="--disk $TARGET_IMG_SWAP,device=disk,bus=virtio,format=raw"
+else
+  DISK_SWAP=""
+fi
 
 # -- Image Provisioning ---------
 
 echo "Provisioning guest $TARGET_NAME"
 echo "Hostname: $HOSTNM"
 echo "CPUs:     $CPUS"
-echo "Memory:   $MEM"
+echo "Memory:   $MEM MB"
+echo "Swap:     $MEM MB"
 echo "MAC:      $MAC"
 virt-install --vcpus $CPUS \
   --ram $MEM --import \
   --name $TARGET_NAME \
-  --disk $TARGET_IMG,format=qcow2 \
+  --disk $TARGET_IMG,device=disk,bus=virtio,format=qcow2 $DISK_SWAP \
   --vnc --noautoconsole --force \
-  --network=$NETWORK,mac=$MAC
+  --network=$NETWORK,mac=$MAC \
+  $NETWORK2
+
+# -- IP Determining -------------
+
+if [ $ADD_IP -eq 1 ]; then
+  echo "Waiting for IP"
+  i=0
+  until [ $i -ge 100 ] || IP_LINE=`cat /var/lib/libvirt/dnsmasq/default.leases /var/lib/dnsmasq/dnsmasq.leases 2>/dev/null | grep "$MAC"`; do
+    i=$((i + 1))
+    sleep 1
+  done
+
+  if [[ -n $IP_LINE ]]; then
+    IP=`echo  $IP_LINE | awk '{print $3}'`
+    if ! grep -q "$HOSTNM\$" /etc/hosts; then
+      echo "Writing into /etc/hosts ip: $IP"
+      echo "$IP $HOSTNM $TARGET_NAME" >> /etc/hosts
+    else
+      echo "Host $HOSTNM already in hosts"
+      OLD_IP=`grep "$HOSTNM\$" /etc/hosts | head -n 1 | awk '{print $1}'`
+      if [[ $IP = $OLD_IP ]]; then
+        echo "and these ip's match"
+      else
+        echo "with different ip: $OLD_IP instead of $IP"
+      fi
+    fi
+  fi
+fi
 
 # -- EOF --
 

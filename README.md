@@ -1,4 +1,3 @@
-
 Quick provision script snap-guest for QEMU/KVM
 ==============================================
 
@@ -23,6 +22,13 @@ Requirements
  * libguestfs-mount
  * vim (no, you don't really need it, but it's recommended :-)
 
+Installation
+------------
+
+ * yum -y install bash sed python-virtinst qemu-img libguestfs-mount
+ * git clone git://github.com/lzap/snap-guest.git
+ * sudo ln -s $PWD/snap-guest/snap-guest /usr/local/bin/snap-guest
+
 How it works
 ------------
 
@@ -33,9 +39,9 @@ lists them using -l option), but it is not mandatory (option -a lists them
 all). The template image format can be qcow2 as well as different one (raw on 
 LVM for example).
 
-Feel free to configure the base image according needs. It's recommended to 
-install few packages like ntpd or acpid. The following blogpost contains more
-information regarding configuring base (or "template") guest:
+Feel free to configure the base image according to your needs. It's recommended
+to install a few packages like ntpd or acpid. The following blog post contains
+more information about configuring base (or "template") guest:
 
 http://lukas.zapletalovi.com/2011/08/configure-red-hat-or-fedora-as-guest.html
 
@@ -46,7 +52,10 @@ The usage is very easy then:
 
     usage: ./snap-guest options
 
-    Simple script for creating copy-on-write QEMU/KVM guests.
+    Simple script for creating copy-on-write QEMU/KVM guests. For the base image
+    install Fedora or RHEL (compatible), install acpid and ntpd or similar, do not
+    make any swap partition (use -s option), make sure the hostname is the same
+    as the vm name and it has "base" in it. Example: rhel-6-base.
 
     OPTIONS:
       -h             Show this message
@@ -60,17 +69,21 @@ The usage is very easy then:
       -p [path]      Images path (default: /var/lib/libvirt/images/)
       -d [domain]    Domain suffix like "mycompany.com" (default: none)
       -f             Force creating new guest (no questions)
+      -w             Add IP address to /etc/hosts (works only with NAT)
+      -s             Swap size (in MB) that is appeded as /dev/sdb to fstab
+      -1 [command]   Command to execute during first boot in /root dir
+                     (logfile available in /root/firstboot.log)
 
     EXAMPLE:
 
       ./snap-guest -l
       ./snap-guest -p /mnt/data/images -l
-      ./snap-guest -b fedora-17-base -t test-vm
+      ./snap-guest -b fedora-17-base -t test-vm -s 4098
       ./snap-guest -b fedora-17-base -t test-vm2 -n bridge=br0 -d example.com
       ./snap-guest -b rhel-6-base -t test-vm -m 2048 -c 4 -p /mnt/data/images
 
-Snap-guest is a great tool for developing or testing. Provisioning new guest 
-from a template is very fast (about 5-10 seconds).
+Snap-guest is a great tool for developing or testing. Provisioning a new
+guest  from a template is very fast (about 5-10 seconds).
 
 Warning
 -------
@@ -79,7 +92,7 @@ There is one **important thing** you need to know. Once you have some guests,
 you **must not start** a template image, because that would break the "child" 
 guests.
 
-You also **must not** change a template even when the "child" buests are 
+You also **must not** change a template even when the "child" guests are 
 _not_ running. Again, if anything changes in a template, images based on the 
 template will be corrupted. Sooner or later.
 
@@ -105,15 +118,37 @@ the same hostname always gives the same address. Example:
 
 This is great for testing - when you provision a box called let's say "test" 
 and delete it, once it is provisioned again with the same name, DHCP will 
-assign it the very same IP address.
+assign it the very same IP address. You can keep hostnames and IPs in the 
+/etc/hosts file and if you won't be shut down your guests for longer periods, 
+IPs never change.
+
+Additionally, if you use snap-guest on the same host where KVM is running, 
+there is a flag that adds entries to your /etc/hosts automatically. See help 
+section for more details.
+
+Recommended disk layout
+-----------------------
+
+Since snap-guest does not support LVM, you have to rely on the formatted 
+partition. It is recommended to use separate dedicated partition for 
+snap-guest. I am happy with ext4 using the extent option enabled and a
+bigger block size. Something like:
+
+    # pvdisplay
+    # lvdisplay
+    # lvcreate -L 140G -n lv_images vg_myhost
+    # mkfs.ext4 -b 4096 -O extent /dev/mapper/vg_myhost-lv_images
 
 Credits and license
 -------------------
 
-The script is distributed under public domain.
+The script is distributed as public domain.
 
 Original script was written by Red Hat folks (Jason Dobies, Shannon Hughes,
 Mike McCune and others), I have slightly modified it, I was using it and after 
 few improvements I decided to share it with the world.
+
+Special thanks to all who improve this set of scripts. See AUTHORS for full 
+list.
 
 vim: tw=79:fo+=w
